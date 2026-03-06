@@ -16,7 +16,7 @@ A high‑performance 3D “Data Cube” visual for Power BI that renders three c
 
 - Dev server: `npm run start`
 - Package visual: `npm run package`
-- The packaged `.pbiviz` is placed in `dist/` (import into Power BI Desktop).
+- The packaged `.pbiviz` is placed in root folder (import into Power BI Desktop).
 
 ## Using the Visual
 
