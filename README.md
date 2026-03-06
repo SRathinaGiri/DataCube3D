@@ -138,7 +138,3 @@ To enable custom report tooltips:
 ---
 
 **Developed by Rathinagiri Subbiah** | [Portfolio](https://www.rathinagiri.in) | [GitHub Repository](https://github.com/SRathinaGiri/DataCube3D)
-
----
-
-**Would you like me to generate the updated .pbiviz file instructions or assist with any other part of your Microsoft submission?**
