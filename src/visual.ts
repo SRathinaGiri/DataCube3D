@@ -37,6 +37,7 @@ import IVisual = powerbi.extensibility.visual.IVisual;
 import IVisualHost = powerbi.extensibility.IVisualHost;
 import ISelectionManager = powerbi.extensibility.ISelectionManager;
 import ISelectionId = powerbi.extensibility.ISelectionId;
+import IVisualEventService = powerbi.extensibility.IVisualEventService;
 
 import { VisualFormattingSettingsModel } from "./settings";
 
@@ -66,6 +67,7 @@ export class Visual implements IVisual {
     private formattingSettings: VisualFormattingSettingsModel;
     private formattingSettingsService: FormattingSettingsService;
     private landingPage: HTMLElement;
+    private events: IVisualEventService;
 
     // three.js
     private renderer: THREE.WebGLRenderer;
@@ -142,6 +144,7 @@ export class Visual implements IVisual {
         this.host = options.host;
         this.formattingSettingsService = new FormattingSettingsService();
         this.container = options.element;
+        this.events = options.host.eventService;
 
         const canvas = document.createElement("canvas");
         canvas.style.width = "100%";
@@ -179,90 +182,111 @@ export class Visual implements IVisual {
         this.buildSvgOverlay();
     }
 
-    public update(options: VisualUpdateOptions) {
-        const dv = options.dataViews && options.dataViews[0];
-        const isDataPresent = !!(dv && dv.matrix && dv.matrix.rows && dv.matrix.rows.root && dv.matrix.rows.root.children && dv.matrix.rows.root.children.length > 0);
+   public update(options: VisualUpdateOptions) {
+       // 1. Notify that rendering has started
+       this.events.renderingStarted(options);
 
-         if (!isDataPresent) {
-            this.showLandingPage();
-            this.clearScene(); // Ensure the 3D canvas is empty
-            // Hide the controls panel if it exists so it doesn't overlap the landing page
-            if (this.controlsPanel) this.controlsPanel.style.display = 'none'; 
-            return; // Stop further execution
-         } else {
-            this.hideLandingPage();
-         }        
-     
-        this.formattingSettings = this.formattingSettingsService.populateFormattingSettingsModel(VisualFormattingSettingsModel, dv);
-        (this as any)._lastDataView = dv;
-        // try reading persisted camera from metadata objects (for bookmarks)
-        try {
-            const objs: any = dv?.metadata?.objects as any;
-            const view: any = objs?.view || {};
-            const n = (v: any, fb: number) => (typeof v === 'number' && isFinite(v)) ? v : fb;
-            this.theta = n(view.cameraTheta, this.theta);
-            this.phi = n(view.cameraPhi, this.phi);
-            this.radius = n(view.cameraRadius, this.radius);
-            this.target.set(n(view.targetX, this.target.x), n(view.targetY, this.target.y), n(view.targetZ, this.target.z));
-            const rz = n(view.rollZ, this.scene?.rotation?.z || 0);
-            if (this.scene) this.scene.rotation.z = rz;
-        } catch {}
+       try {
+           const dv = options.dataViews && options.dataViews[0];
+           const isDataPresent = !!(dv && dv.matrix && dv.matrix.rows && dv.matrix.rows.root && dv.matrix.rows.root.children && dv.matrix.rows.root.children.length > 0);
 
-        // cache axis names and measure metadata for tooltips/labels
-        try {
-            const lvls = dv?.matrix?.rows?.levels as any[] | undefined;
-            const namesByAxis = [[], [], []] as string[][];
-            (lvls || []).forEach((lvl: any) => {
-                const src = lvl?.sources?.[0];
-                const roles = src?.roles || {};
-                const name = src?.displayName;
-                if (roles.dim1) namesByAxis[0].push(name);
-                else if (roles.dim2) namesByAxis[1].push(name);
-                else if (roles.dim3) namesByAxis[2].push(name);
-            });
-            const joinN = (arr: string[], fallback: string) => arr.filter(Boolean).join(" / ") || fallback;
-            this.axisNames = {
-                x: joinN(namesByAxis[0], "Dim1"),
-                y: joinN(namesByAxis[1], "Dim2"),
-                z: joinN(namesByAxis[2], "Dim3")
-            };
-            const meas = dv?.matrix?.valueSources?.[0];
-            this.measureMeta = { name: meas?.displayName || "Value", format: (meas as any)?.format };
-        } catch { /* ignore */ }
+           if (!isDataPresent) {
+               this.showLandingPage();
+               this.clearScene();
+               if (this.controlsPanel) this.controlsPanel.style.display = 'none';
+               
+               // Exit point: Data not present
+               this.events.renderingFinished(options);
+               return;
+           } else {
+               this.hideLandingPage();
+           }
 
-        const width = Math.max(1, options.viewport.width);
-        const height = Math.max(1, options.viewport.height);
-        this.renderer.setSize(width, height, false);
-        this.camera.aspect = width / height;
-        this.camera.updateProjectionMatrix();
-        this.updateGizmoSize();
+           this.formattingSettings = this.formattingSettingsService.populateFormattingSettingsModel(VisualFormattingSettingsModel, dv);
+           (this as any)._lastDataView = dv;
 
-        // Show/hide control panel based on setting
-        try {
-            const showControls = (this.formattingSettings?.cubeCard?.showControls?.value) !== false;
-            if (this.controlsPanel) this.controlsPanel.style.display = showControls ? 'grid' : 'none';
-            if (this.controlsToggleBtn) this.controlsToggleBtn.title = showControls ? 'Hide controls' : 'Show controls';
-        } catch {}
+           // Camera settings block
+           try {
+               const objs: any = dv?.metadata?.objects as any;
+               const view: any = objs?.view || {};
+               const n = (v: any, fb: number) => (typeof v === 'number' && isFinite(v)) ? v : fb;
+               this.theta = n(view.cameraTheta, this.theta);
+               this.phi = n(view.cameraPhi, this.phi);
+               this.radius = n(view.cameraRadius, this.radius);
+               this.target.set(n(view.targetX, this.target.x), n(view.targetY, this.target.y), n(view.targetZ, this.target.z));
+               const rz = n(view.rollZ, this.scene?.rotation?.z || 0);
+               if (this.scene) this.scene.rotation.z = rz;
+           } catch { /* Internal suppression is fine */ }
 
-        if (!dv || !dv.matrix) {
-            this.clearScene();
-            this.renderWithOverlays();
-            return;
-        }
+           // Axis/Measure metadata block
+           try {
+               const lvls = dv?.matrix?.rows?.levels as any[] | undefined;
+               const namesByAxis = [[], [], []] as string[][];
+               (lvls || []).forEach((lvl: any) => {
+                   const src = lvl?.sources?.[0];
+                   const roles = src?.roles || {};
+                   const name = src?.displayName;
+                   if (roles.dim1) namesByAxis[0].push(name);
+                   else if (roles.dim2) namesByAxis[1].push(name);
+                   else if (roles.dim3) namesByAxis[2].push(name);
+               });
+               const joinN = (arr: string[], fallback: string) => arr.filter(Boolean).join(" / ") || fallback;
+               this.axisNames = {
+                   x: joinN(namesByAxis[0], "Dim1"),
+                   y: joinN(namesByAxis[1], "Dim2"),
+                   z: joinN(namesByAxis[2], "Dim3")
+               };
+               const meas = dv?.matrix?.valueSources?.[0];
+               this.measureMeta = { name: meas?.displayName || "Value", format: (meas as any)?.format };
+           } catch { /* Internal suppression is fine */ }
 
-        const parsed = this.parseMatrix(dv);
-        (this as any)._lastData = parsed;
-        this.updateAxisInfo(dv);
-        this.buildInstanced(parsed);
-        // auto-fit only initially or after Reset
-        if (this.shouldAutoFit) {
-            this.fitToCube(parsed);
-        } else {
-            this.updateZoomLabel();
-        }
-        this.renderWithOverlays();
-    }
+           const width = Math.max(1, options.viewport.width);
+           const height = Math.max(1, options.viewport.height);
+           this.renderer.setSize(width, height, false);
+           this.camera.aspect = width / height;
+           this.camera.updateProjectionMatrix();
+           this.updateGizmoSize();
 
+           // Control panel block
+           try {
+               const showControls = (this.formattingSettings?.cubeCard?.showControls?.value) !== false;
+               if (this.controlsPanel) this.controlsPanel.style.display = showControls ? 'grid' : 'none';
+               if (this.controlsToggleBtn) this.controlsToggleBtn.title = showControls ? 'Hide controls' : 'Show controls';
+           } catch { /* Internal suppression is fine */ }
+
+           if (!dv || !dv.matrix) {
+               this.clearScene();
+               this.renderWithOverlays();
+               
+               // Exit point: No matrix
+               this.events.renderingFinished(options);
+               return;
+           }
+
+           // Final scene building and rendering
+           const parsed = this.parseMatrix(dv);
+           (this as any)._lastData = parsed;
+           this.updateAxisInfo(dv);
+           this.buildInstanced(parsed);
+           
+           if (this.shouldAutoFit) {
+               this.fitToCube(parsed);
+           } else {
+               this.updateZoomLabel();
+           }
+
+           this.renderWithOverlays();
+
+           // 2. Success exit point
+           this.events.renderingFinished(options);
+
+       } catch (e) {
+           // 3. Failure exit point
+           console.error("Rendering failed", e);
+           this.events.renderingFailed(options, e instanceof Error ? e.message : "Unknown error");
+       }
+   }
+   
     public getFormattingModel(): powerbi.visuals.FormattingModel {
         return this.formattingSettingsService.buildFormattingModel(this.formattingSettings);
     }
